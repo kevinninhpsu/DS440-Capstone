@@ -1,0 +1,60 @@
+1. khanhbell12345: 1393 games
+  elo: 2971 (2722|2833)
+  avg # moves: 75
+2. Tarros: 1324 games
+  elo: 1784 (1667|1867)
+  avg # moves: 43
+3. jmanette411: 1323 games
+  elo: 917 (760|1026)
+  avg # moves: 30
+4. eltvillekuhn: 1240 games
+  elo: 2113 (1998|2251)
+  avg # moves: 39
+5. Skar77: 1239 games
+  elo: 1502 (1213|1697)
+  avg # moves: 22
+6. thekinglear: 1139 games
+  elo: 2360 (2236|2469)
+  avg # moves: 59
+7. AVK8899: 1086 games
+  elo: 1828 (1700|1960)
+  avg # moves: 36
+8. CatDevURandom: 1084 games
+  elo: 1513 (1369|1633)
+  avg # moves: 29
+9. bobbyfrogster: 1006 games
+  elo: 1476 (1333|1604)
+  avg # moves: 34
+10. Abd_jabbar02: 981 games
+  elo: 2038 (1910|2118)
+  avg # moves: 44
+11. RunAfterU: 975 games
+  elo: 1815 (1734|1885)
+  avg # moves: 41
+12. sazhinser: 958 games
+  elo: 2009 (1898|2082)
+  avg # moves: 41
+13. Ismaelopete23: 941 games
+  elo: 1694 (1585|1852)
+  avg # moves: 34
+14. strategicomplexity: 935 games
+  elo: 2150 (2039|2260)
+  avg # moves: 44
+15. kudaliarrinjanii: 906 games
+  elo: 2009 (1899|2098)
+  avg # moves: 36
+16. yakovnat: 881 games
+  elo: 1993 (1920|2073)
+  avg # moves: 38
+17. jafar2021: 848 games
+  elo: 1841 (1736|1953)
+  avg # moves: 49
+18. knight_on_mars: 825 games
+  elo: 2153 (2005|2263)
+  avg # moves: 55
+19. Razil77777330909: 824 games
+  elo: 1614 (1441|1771)
+  avg # moves: 36
+20. cimnono: 815 games
+  elo: 1733 (1634|1805)
+  avg # moves: 39
