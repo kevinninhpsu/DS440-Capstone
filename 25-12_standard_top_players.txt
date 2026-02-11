@@ -1,0 +1,60 @@
+1. mrkeshavarz2025: 779 games
+  elo: 1402 (1235|1506)
+  avg # moves: 44
+2. maia1: 729 games
+  elo: 1593 (1451|1702)
+  avg # moves: 43
+3. Pahok: 570 games
+  elo: 814 (746|908)
+  avg # moves: 37
+4. garichtidze123: 541 games
+  elo: 1606 (1480|1708)
+  avg # moves: 49
+5. asghar7arab: 534 games
+  elo: 1693 (1619|1768)
+  avg # moves: 57
+6. theuglyamerican: 523 games
+  elo: 1397 (1287|1511)
+  avg # moves: 44
+7. babakordi1360: 475 games
+  elo: 1895 (1752|1939)
+  avg # moves: 47
+8. Pancugolo: 472 games
+  elo: 1315 (1219|1412)
+  avg # moves: 30
+9. lazi-eri: 466 games
+  elo: 1479 (1396|1595)
+  avg # moves: 40
+10. bachar53: 456 games
+  elo: 1306 (1201|1393)
+  avg # moves: 43
+11. mby123: 453 games
+  elo: 1796 (1684|1877)
+  avg # moves: 46
+12. Bijay_1549: 450 games
+  elo: 1741 (1669|1823)
+  avg # moves: 38
+13. PaulGherman: 418 games
+  elo: 1645 (1555|1701)
+  avg # moves: 45
+14. Robertqwe: 412 games
+  elo: 1578 (1515|1670)
+  avg # moves: 35
+15. Mouna007: 410 games
+  elo: 1406 (1285|1471)
+  avg # moves: 37
+16. escorpion20: 408 games
+  elo: 1276 (1192|1339)
+  avg # moves: 36
+17. dennismuchimba: 408 games
+  elo: 1102 (992|1181)
+  avg # moves: 37
+18. pagozhin: 404 games
+  elo: 1932 (1878|2005)
+  avg # moves: 56
+19. amirtoli2: 398 games
+  elo: 1941 (1862|2050)
+  avg # moves: 43
+20. erasheed: 392 games
+  elo: 1247 (1149|1312)
+  avg # moves: 45
