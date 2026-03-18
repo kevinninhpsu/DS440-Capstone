@@ -1,4 +1,5 @@
 import chess.pgn
+import json
 import numpy as np
 import tensorflow as tf
 symbol_map = {
@@ -13,6 +14,30 @@ def load_pgn(pgn_file):
             if game is None:
                 break
             games.append(game)
+    return games
+def load_json(json_file):
+    games = []
+    with open(json_file, "r") as f:
+        data = json.load(f)
+    for g in data:
+        game = chess.pgn.Game()
+        game.headers["Event"] = g.get("event", "?")
+        game.headers["White"] = g.get("white", "?")
+        game.headers["Black"] = g.get("black", "?")
+        game.headers["Result"] = g.get("result", "*")
+        board = chess.Board()
+        node = game
+        moves_list = g["moves"].split()
+        for move_str in moves_list:
+            move_str = move_str.strip()
+            if not move_str or move_str[0].isdigit():
+                continue
+            try:
+                move = board.push_san(move_str)
+                node = node.add_variation(move)
+            except ValueError:
+                print("Skipping invalid move:", move_str)
+        games.append(game)
     return games
 def pgn_to_player_samples(games, player_id):
     samples = []
@@ -42,46 +67,53 @@ def pgn_to_player_samples(games, player_id):
     return samples
     
 def encode_board(board):
-    tensor = np.zeros((12, 8, 8), dtype=np.float32)
+    tensor = np.zeros((8, 8, 12), dtype=np.float32)
 
     for square, piece in board.piece_map().items():
+        
         row = 7 - (square // 8)
         col = square % 8
         plane = piece.piece_type - 1
         if piece.color == chess.BLACK:
             plane += 6
-        tensor[plane, row, col] = 1.0
+        
+        tensor[row, col, plane] = 1.0
     return tensor
     
-def move_to_index(move): 
-    return move.from_square * 64 + move.to_square
+def move_to_index(move):
+    if move.promotion:
+        promo_offset = {chess.KNIGHT: 0, chess.BISHOP: 1, chess.ROOK: 2, chess.QUEEN: 3}[move.promotion]
+        return 4096 + move.from_square * 4 + promo_offset
+    else:
+        return move.from_square * 64 + move.to_square
+
     
 class Agent:
     def __init__(self, id):
         self.id = id
 
     def act(self, state):
-        x = encode_board(board)         
+        x = encode_board(state)         
         x = np.expand_dims(x, axis=0)
         probs = self.model.predict(x, verbose=0)[0]
         best_move = None
         best_score = -1.0    
         for move in state.legal_moves:
-            idx = move.from_square * 64 + move.to_square
+            idx = move_to_index(move)
             score = probs[idx]
             if score > best_score:
                 best_score = score
                 best_move = move
         return best_move
-        
+    
     def train(self,games):
         samples = pgn_to_player_samples(games,self.id)
-        
+
         X = np.array([s[0] for s in samples], dtype=np.float32)
         Y = np.array([s[1] for s in samples], dtype=np.int32)
         
         self.model = tf.keras.Sequential([
-            tf.keras.layers.Input(shape=(12,8,8)),          # board tensor
+            tf.keras.layers.Input(shape=(8,8,12)),          # board tensor
             tf.keras.layers.Conv2D(64, kernel_size=3, padding='same', activation='relu'),
             tf.keras.layers.Conv2D(128, kernel_size=3, padding='same', activation='relu'),
             tf.keras.layers.Flatten(),
