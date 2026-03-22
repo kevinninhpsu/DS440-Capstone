@@ -15,6 +15,8 @@ def load_pgn(pgn_file):
                 break
             games.append(game)
     return games
+import re
+DIV_RE = re.compile(r"(\s?(\d)+\.\s|\s)")
 def load_json(json_file):
     games = []
     with open(json_file, "r") as f:
@@ -27,39 +29,36 @@ def load_json(json_file):
         game.headers["Result"] = g.get("result", "*")
         board = chess.Board()
         node = game
-        moves_list = g["moves"].split()
-        for move_str in moves_list:
-            move_str = move_str.strip()
-            if not move_str or move_str[0].isdigit():
-                continue
-            try:
-                move = board.push_san(move_str)
-                node = node.add_variation(move)
-            except ValueError:
-                print("Skipping invalid move:", move_str)
+        moves = DIV_RE.sub('|',g.get('moves')).split('|')[1:-1]
+        for move in moves:
+            move = board.push_san(move.strip(" "))
+            node = node.add_variation(move)
+            
         games.append(game)
     return games
-def pgn_to_player_samples(games, player_id):
+
+def pgn_to_player_samples(games, player_id=""):
     samples = []
-    player_id = player_id.lower()
+    player_id = player_id.lower().strip()
 
     for game in games:
         white = game.headers.get("White", "").lower()
         black = game.headers.get("Black", "").lower()
 
-        if player_id == white:
-            player_color = chess.WHITE
-        elif player_id == black:
-            player_color = chess.BLACK
+        if player_id == "":
+            include_white = True
+            include_black = True
         else:
-            continue
-
+            include_white = (player_id == white)
+            include_black = (player_id == black)
+            if not (include_white or include_black):
+                continue  # skip
         board = game.board()
 
         for move in game.mainline_moves():
-            if board.turn == player_color:
-                x = encode_board(board)      # ✅ numeric tensor
-                y = move_to_index(move)      # ✅ integer
+            if (board.turn == chess.WHITE and include_white) or (board.turn == chess.BLACK and include_black):
+                x = encode_board(board)
+                y = move_to_index(move)
                 samples.append((x, y))
 
             board.push(move)
@@ -67,7 +66,7 @@ def pgn_to_player_samples(games, player_id):
     return samples
     
 def encode_board(board):
-    tensor = np.zeros((8, 8, 12), dtype=np.float32)
+    tensor = np.zeros((8, 8, 12), bool)
 
     for square, piece in board.piece_map().items():
         
@@ -107,17 +106,24 @@ class Agent:
         return best_move
     
     def train(self,games):
-        samples = pgn_to_player_samples(games,self.id)
-
-        X = np.array([s[0] for s in samples], dtype=np.float32)
-        Y = np.array([s[1] for s in samples], dtype=np.int32)
         
+        samples = pgn_to_player_samples(games,self.id)
+        batch_size = 32
+        epochs=1
+        n = len(samples)
+        def gen():
+            for i in range(0, n, batch_size):
+                batch = samples[i:i+batch_size]
+                X = np.array([s[0] for s in batch], dtype=bool).astype(np.float32)
+                Y = np.array([s[1] for s in batch], dtype=np.int32)
+                yield X, Y
+                
         self.model = tf.keras.Sequential([
-            tf.keras.layers.Input(shape=(8,8,12)),          # board tensor
+            tf.keras.layers.Input(shape=(8,8,12)),         
             tf.keras.layers.Conv2D(64, kernel_size=3, padding='same', activation='relu'),
             tf.keras.layers.Conv2D(128, kernel_size=3, padding='same', activation='relu'),
             tf.keras.layers.Flatten(),
-            tf.keras.layers.Dense(4672, activation='softmax')  # all possible moves
+            tf.keras.layers.Dense(4672, activation='softmax')  
         ])
         
         self.model.compile(
@@ -126,10 +132,6 @@ class Agent:
             metrics=['accuracy']
         )
         
-        self.model.fit(
-            X, Y,
-            batch_size=128,
-            epochs=10,
-            validation_split=0.1,
-            shuffle=True
-        ) 
+
+        steps = (n + batch_size - 1) // batch_size
+        self.model.fit(gen(), steps_per_epoch=steps, epochs=epochs)
