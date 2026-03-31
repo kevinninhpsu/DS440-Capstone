@@ -1,168 +1,218 @@
-"""
-Chess Authorship Attribution - Sequence Model (Capstone Final)
---------------------------------------------------------------
-This model learns the long-term strategic style of two players by evaluating 
-the first 40 moves of their games using a TimeDistributed Dense network 
-feeding into stacked LSTMs.
-"""
+import sys  
+import json 
+import io  
+import random  
+import tensorflow as tf  
+from tensorflow.keras import regularizers  
+import numpy as np  
+import chess  # chess logic
+import chess.pgn  # reads PGN
 
-import sys
-import json
-import io
-import random
-import tensorflow as tf
-from tensorflow.keras import regularizers
-import numpy as np
-import chess
-import chess.pgn
-
-# Ensure compatibility
+# Ensure TensorFlow works with current Python version
 assert sys.version_info < (3, 14), "TensorFlow requires Python 3.13 or older."
 
-SEQ_LENGTH = 40 
+# Maximum number of moves per game (sequence length)
+SEQ_LENGTH = 40
 
-# ============================================================
-# 1. BOARD & MOVE ENCODING
-# ============================================================
+# ==============================
+# 1. MOVE DICTIONARY
+# ==============================
+# This builds a mapping from every possible move to a number
+
 def build_move_dict():
     moves = []
+    
+    # Promotion pieces (pawn reaching end of board)
     promotion_pieces = [None, chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT]
 
+    # Loop over ALL possible squares on the board
     for from_sq in chess.SQUARES:
         for to_sq in chess.SQUARES:
             for promo in promotion_pieces:
                 try:
+                    # Create a move (like e2e4)
                     move = chess.Move(from_sq, to_sq, promotion=promo)
-                    moves.append(move.uci())
+                    moves.append(move.uci())  # convert to string format
                 except Exception:
-                    pass
+                    pass  # ignore invalid moves
 
+    # Remove duplicates and sort
     moves = sorted(set(moves))
+    
+    # Map each move string → unique integer
     return {m: i for i, m in enumerate(moves)}
 
+# Create dictionary
 move_to_idx = build_move_dict()
-NUM_MOVES = len(move_to_idx)
+NUM_MOVES = len(move_to_idx)  # total number of possible moves
+
+# ==============================
+# 2. BOARD ENCODING
+# ==============================
+# Converts a chess board into numbers
+# Output shape: (8, 8, 12)
+# Explanation:
+# - 8x8 = chess board
+# - 12 channels = 6 piece types × 2 colors
 
 def board_to_tensor(board):
-    """Converts a chess.Board into an 8x8x12 spatial tensor."""
     tensor = np.zeros((8, 8, 12), dtype=np.float32)
+    
+    # piece_map gives all pieces currently on the board
     for square, piece in board.piece_map().items():
+        
+        # Convert square index → row/column
         row = 7 - chess.square_rank(square)
         col = chess.square_file(square)
+        
+        # piece_type: pawn=1, knight=2, etc → shift to 0-based index
         piece_type = piece.piece_type - 1
+        
+        # Separate white and black pieces into different channels
         color_offset = 0 if piece.color == chess.WHITE else 6
+        
+        # Set that position to 1 (one-hot encoding)
         tensor[row, col, piece_type + color_offset] = 1
+
     return tensor
 
-# ============================================================
-# 2. JSON DATA LOADER (SEQUENCES)
-# ============================================================
+# ==============================
+# 3. DATA LOADING
+# ==============================
+# Turns JSON games into sequences the model can learn from
+
 def load_json_game_sequences(json_path, player_name, label_value, max_games=500):
-    """
-    Extracts games as sequences of up to SEQ_LENGTH moves. 
-    Returns: Shape (num_games, SEQ_LENGTH, 8, 8, 12) for boards
-             Shape (num_games, SEQ_LENGTH) for moves
-    """
-    game_boards_master = []
-    game_moves_master = []
+    
+    game_boards_master = []  # all board sequences
+    game_moves_master = []   # all move sequences
     
     with open(json_path, 'r') as f:
         games = json.load(f)
         
     for i, game_data in enumerate(games):
-        if i >= max_games: break
+        if i >= max_games:
+            break
             
+        # Check if player is white
         is_player_white = (game_data.get("white") == player_name)
+        
+        # Convert move string into readable format
         pgn_io = io.StringIO(game_data["moves"])
         game = chess.pgn.read_game(pgn_io)
         
-        if game is None: continue
+        if game is None:
+            continue
             
         board = game.board()
         current_game_boards = []
         current_game_moves = []
         
+        # Go through every move in the game
         for move in game.mainline_moves():
             is_white_turn = (board.turn == chess.WHITE)
             
+            # Only record moves made by the target player
             if (is_white_turn and is_player_white) or (not is_white_turn and not is_player_white):
+                
                 if move.uci() in move_to_idx:
                     current_game_boards.append(board_to_tensor(board))
                     current_game_moves.append(move_to_idx[move.uci()])
                     
-            board.push(move)
+            board.push(move)  # update board
             
-        # 1. Truncate if the game is longer than our SEQ_LENGTH
+        # Truncate to max length
         current_game_boards = current_game_boards[:SEQ_LENGTH]
         current_game_moves = current_game_moves[:SEQ_LENGTH]
         
-        # 2. Pad with zeros if the game is shorter than SEQ_LENGTH
+        # Pad if too short
         while len(current_game_boards) < SEQ_LENGTH:
             current_game_boards.append(np.zeros((8, 8, 12), dtype=np.float32))
-            current_game_moves.append(0) 
+            current_game_moves.append(0)
             
         game_boards_master.append(current_game_boards)
         game_moves_master.append(current_game_moves)
-            
+        
     labels = [label_value] * len(game_boards_master)
     return game_boards_master, game_moves_master, labels
 
-# ============================================================
-# 3. SEQUENCE CLASSIFIER ARCHITECTURE (The "Hourglass")
-# ============================================================
+# ==============================
+# 4. MODEL ARCHITECTURE
+# ==============================
+
 def build_style_classifier():
+    
+    # Inputs
     board_seq_input = tf.keras.Input(shape=(SEQ_LENGTH, 8, 8, 12), name="board_seq")
     move_seq_input = tf.keras.Input(shape=(SEQ_LENGTH, NUM_MOVES), name="move_seq")
     
-    # --- GLOBAL BOARD EXTRACTOR ---
-    # 512-width layers with L2 Regularization to prevent overfitting
+    # ------------------------------
+    # BOARD FEATURE EXTRACTOR
+    # ------------------------------
+    # A neural network that processes ONE board
     dense_base = tf.keras.Sequential([
         tf.keras.layers.Flatten(input_shape=(8, 8, 12)),
-        tf.keras.layers.Dense(512, activation="relu", kernel_regularizer=regularizers.l2(0.001)),
+        
+        # Dense layer = fully connected layer
+        # Every input connects to every output
+        tf.keras.layers.Dense(512, activation="relu",
+                              kernel_regularizer=regularizers.l2(0.001)),
+        
+        # Dropout = randomly turns off neurons to prevent overfitting
         tf.keras.layers.Dropout(0.4),
-        tf.keras.layers.Dense(512, activation="relu", kernel_regularizer=regularizers.l2(0.001))
-    ], name="global_board_extractor")
+        
+        tf.keras.layers.Dense(512, activation="relu",
+                              kernel_regularizer=regularizers.l2(0.001))
+    ])
     
-    # Process the sequence of boards
+    # Apply this to EACH timestep (each move)
     encoded_boards = tf.keras.layers.TimeDistributed(dense_base)(board_seq_input)
     
-    # Combine the processed board state with the actual move chosen
+    # Combine board features + move information
     combined_seq = tf.keras.layers.Concatenate(axis=-1)([encoded_boards, move_seq_input])
     
-    # --- LONG-TERM MEMORY (LSTM) ---
-    # Stepping down the node count to avoid exploding parameters
+    # ------------------------------
+    # SEQUENCE MODEL (LSTM)
+    # ------------------------------
+    # LSTM = a type of neural network for sequences (like time series)
+    # It remembers past information
+    
     x = tf.keras.layers.LSTM(256, return_sequences=True)(combined_seq)
     x = tf.keras.layers.Dropout(0.4)(x)
-    x = tf.keras.layers.LSTM(128)(x) 
     
-    # --- FINAL DECISION BLOCK ---
+    # This LSTM compresses entire sequence → one vector
+    x = tf.keras.layers.LSTM(128)(x)
+    
+    # ------------------------------
+    # FINAL CLASSIFIER
+    # ------------------------------
     x = tf.keras.layers.Dense(128, activation="relu")(x)
     x = tf.keras.layers.Dropout(0.4)(x)
     x = tf.keras.layers.Dense(64, activation="relu")(x)
     
-    # Final Output: 1 = Player A, 0 = Player B
-    output = tf.keras.layers.Dense(1, activation="sigmoid", name="player_a_prob")(x)
+    # Sigmoid = outputs number between 0 and 1 (probability)
+    output = tf.keras.layers.Dense(1, activation="sigmoid")(x)
     
     return tf.keras.Model(inputs=[board_seq_input, move_seq_input], outputs=output)
+
 
 # ============================================================
 # 4. TRAINING EXECUTION
 # ============================================================
 if __name__ == "__main__":
-    print(f"Loading Player A (mrkeshavarz2025) games as sequences of {SEQ_LENGTH} moves...")
+    print(f"Loading Player A (Pancugolo) games as sequences of {SEQ_LENGTH} moves...")
     b_A, m_A, l_A = load_json_game_sequences(
-        "mrkeshavarz2025_games.json", 
-        player_name="mrkeshavarz2025", 
+        "Pancugolo_games.json", 
+        player_name="Pancugolo", 
         label_value=1.0, 
-        max_games=443
+        max_games=318
     )
     
-    print(f"Loading Player B (asghar7arab) games as sequences of {SEQ_LENGTH} moves...")
+    print(f"Loading Player B (Mouna007) games as sequences of {SEQ_LENGTH} moves...")
     b_B, m_B, l_B = load_json_game_sequences(
-        "asghar7arab_games.json", 
-        player_name="asghar7arab", 
+        "Mouna007_games.json", 
+        player_name="Mouna007", 
         label_value=0.0, 
-        max_games=443
+        max_games=318
     )
     
     # Combine datasets
@@ -214,7 +264,7 @@ if __name__ == "__main__":
         x={"board_seq": all_boards, "move_seq": all_moves_onehot},
         y=all_labels,
         batch_size=32, 
-        epochs=30, # High epoch count; early_stop will safely cut it off
+        epochs=20, # High epoch count; early_stop will safely cut it off
         validation_split=0.2,
         callbacks=[early_stop, checkpoint]
     )
