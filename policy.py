@@ -193,32 +193,28 @@ class Agent:
         def build_model():
             inputs = tf.keras.layers.Input(shape=(8, 8, 12))
             
-            # Reshape to sequence of squares
             x = tf.keras.layers.Reshape((64, 12))(inputs)
             
-            # Project up
             x = tf.keras.layers.Dense(256, activation='relu')(x)
             x = tf.keras.layers.LayerNormalization()(x)
-            
-            # Attention block 1
+
+            # attention blocks
             attn1 = tf.keras.layers.MultiHeadAttention(num_heads=8, key_dim=32)(x, x)
-            x = tf.keras.layers.Add()([x, attn1])           # residual connection
+            x = tf.keras.layers.Add()([x, attn1])
             x = tf.keras.layers.LayerNormalization()(x)
             x = tf.keras.layers.Dropout(0.1)(x)
             
-            # Attention block 2
             attn2 = tf.keras.layers.MultiHeadAttention(num_heads=8, key_dim=32)(x, x)
-            x = tf.keras.layers.Add()([x, attn2])           # residual connection
+            x = tf.keras.layers.Add()([x, attn2])
             x = tf.keras.layers.LayerNormalization()(x)
             x = tf.keras.layers.Dropout(0.1)(x)
         
-            # Attention block 3
             attn3 = tf.keras.layers.MultiHeadAttention(num_heads=8, key_dim=32)(x, x)
             x = tf.keras.layers.Add()([x, attn3])
             x = tf.keras.layers.LayerNormalization()(x)
             x = tf.keras.layers.Dropout(0.1)(x)
             
-            # Deep dense layers
+            # dense layers
             x = tf.keras.layers.Flatten()(x)
             x = tf.keras.layers.Dense(4096, activation='relu')(x)
             x = tf.keras.layers.LayerNormalization()(x)
