@@ -2,7 +2,7 @@ import chess.pgn
 import json
 import numpy as np
 import tensorflow as tf
-
+from stockfish import Stockfish
 print('POLICY V7')
 symbol_map = {
     0:'P',1:'N',2:'B',3:'R',4:'Q',5:'K',   # white
@@ -101,11 +101,7 @@ def encode_board(board):
     return tensor
 
 
-
-
-def move_to_conf_matrix(move):
-    
-    matrix = np.zeros((8, 8, 8, 12), dtype=np.float32)
+def move_to_conf(move):
     from_row = move.from_square // 8
     from_col = move.from_square % 8
     to_row   = move.to_square // 8
@@ -118,19 +114,30 @@ def move_to_conf_matrix(move):
             chess.ROOK:   10,
             chess.QUEEN:  11
         }[move.promotion]
-        matrix[from_row, from_col, to_row, promo_offset] = 1.0
+        return from_row, from_col, to_row, promo_offset
     else:
-        matrix[from_row, from_col, to_row, to_col] = 1.0
+        return from_row, from_col, to_row, to_col
+
+
+
+def move_to_conf_matrix(move):
+    
+    matrix = np.zeros((8, 8, 8, 12), dtype=np.float32)
+
+    matrix[move_to_conf(move)] = 1.0
 
     return matrix
 
     
 class Agent:
-    def __init__(self, id):
+    def __init__(self, id,stockfish_path=""):
         print('Agent V2')
         print(tf.config.list_physical_devices('GPU'))
         self.id = id
-
+        sf = Stockfish(stockfish_path)
+        sf.set_depth(6)       
+        sf.set_skill_level(6)     
+        self.sf = sf
     def is_blunder(self, board, move, sf, threshold=200):
     
         sf.set_fen_position(board.fen())
@@ -148,34 +155,55 @@ class Agent:
             
         print(before, after, board, move)
         return (before - after) > threshold
-    def act(self, state, sf=None, blunder_threshold=200):
-        x = encode_board(state)
-        x = np.expand_dims(x, axis=0)
-        probs = self.model.predict(x, verbose=0)[0]  # shape (8,8,8,12)
 
-        legal_moves = list(state.legal_moves)
-        print(state.legal_moves)
-        scored_moves = []
+    def evaluate_state(self,board):
+        self.sf.set_fen_position(board.fen())
+        eval_info = self.sf.get_evaluation()
+        
+        if eval_info['type'] == 'mate':
+            score = 10000 if eval_info['value'] > 0 else -10000
+        else:
+            score = eval_info['value'] 
+        return score
+    def evaluate_move(self,board,move):
+        base_board_centipawn=self.evaluate_state(board)
+        board.push(move)
+        next_board_centipawn=self.evaluate_state(board)
+        score = next_board_centipawn-base_board_centipawn # delta centipawns between board0 to board1
+        board.pop()
+        return score
+    def expected_outcome_matrix(self,board,legal_moves):
+        tensor = np.zeros((8,8, 8, 12), np.float32)
         for move in legal_moves:
             
-            m = move_to_conf_matrix(move)
-            print(m)
-            score = np.sum(probs * m)
-            scored_moves.append((score, move))
-
-        scored_moves.sort(key=lambda x: x[0], reverse=True)
-
-        blocked = 0
-        print('selecting move', sf)
-        for score, move in scored_moves:
-            if sf is None or not self.is_blunder(state, move, sf, 100):
-                return [move, blocked]
-            else:
-                blocked += 1
-                print('Move blocked:', move)
-
+            score = self.evaluate_move(board,move)
+            tensor[move_to_conf(move)] = score
+        return tensor
+    
+    def act(self, state, a=0.5):
+        x = encode_board(state)
+        x = np.expand_dims(x, axis=0)
+        legal_moves = list(state.legal_moves)
         
-        return [scored_moves[0][1], blocked] if scored_moves else ValueError('Error: No Legal Move in Matrix')
+        probs = self.model.predict(x, verbose=0)[0]  # shape (8,8,8,12)
+        exp_out = self.expected_outcome_matrix(state,legal_moves)
+        #nomalize the outcome matrix data to range between 0 and 1 that would sum up to 1.
+        orig_shape = exp_out.shape  # save original shape
+        exp_out = tf.convert_to_tensor(exp_out, dtype=tf.float32)
+        exp_out_flat = tf.reshape(exp_out, [-1])          # flatten
+        exp_out_softmax = tf.nn.softmax(exp_out_flat)     # softmax
+        exp_out_normalized = tf.reshape(exp_out_softmax, orig_shape)  # back to (8,8,8,12)
+        
+        balancer = probs*a+exp_out_normalized*(1-a) # score = expected outcome + player preference
+        
+        scored_moves = []
+        for move in state.legal_moves:
+            idx = move_to_conf(move) 
+            move_score = balancer[idx]
+            scored_moves.append((move_score, move))
+        
+        return max(scored_moves, key=lambda x: x[0])[1] if scored_moves else ValueError('Error: No Legal Move in Matrix')
+        
 
     def train(self, games):
         samples = pgn_to_player_samples(games, self.id)
