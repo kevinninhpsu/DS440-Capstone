@@ -234,60 +234,35 @@ def predict_similarity(game_data, player_name, model_path="best_by_game_discrimi
 #     0% = completely different styles
 
 def compute_overall_similarity(json_A, json_B, player_A, player_B, model):
-    # 1. Load all games from JSON files first
+    scores_A = []
+    scores_B = []
+
     with open(json_A, 'r') as f:
         games_A = json.load(f)
-    with open(json_B, 'r') as f:
-        games_B = json.load(f)
 
-    # 2. ADDED: EQUAL GAME BALANCING FOR SCORING
-    # Find the smaller count to ensure a fair comparison
-    min_count = min(len(games_A), len(games_B))
-    
-    # Trim both lists so they are the same size
-    # We slice from the front to keep it consistent with the training logic
-    games_A = games_A[:min_count]
-    games_B = games_B[:min_count]
-
-    scores_A = []  
-    scores_B = []  
-
-    print(f"  Scoring {len(games_A)} games from {player_A}...")
     for game_data in games_A:
         score = predict_similarity(game_data, player_A, model=model)
         if score is not None:
             scores_A.append(score)
 
-    print(f"  Scoring {len(games_B)} games from {player_B}...")
+    with open(json_B, 'r') as f:
+        games_B = json.load(f)
+
     for game_data in games_B:
         score = predict_similarity(game_data, player_B, model=model)
         if score is not None:
             scores_B.append(score)
 
     if not scores_A or not scores_B:
-        print("Error: could not score enough games to compute similarity.")
         return None
-
-    # 3. RE-BALANCE USABLE SCORES
-    # Sometimes games fail the "usable" check (e.g., < 5 moves after filtering).
-    # We balance one last time to ensure the averages are based on the same sample size.
-    min_usable = min(len(scores_A), len(scores_B))
-    scores_A = scores_A[:min_usable]
-    scores_B = scores_B[:min_usable]
 
     avg_A      = np.mean(scores_A)
     avg_B      = np.mean(scores_B)
     separation = avg_A - avg_B
-    similarity = (1.0 - separation) * 100.0
 
-    return {
-        "avg_score_A":    avg_A,
-        "avg_score_B":    avg_B,
-        "separation":     separation,
-        "similarity_%":   similarity,
-        "games_scored_A": len(scores_A),
-        "games_scored_B": len(scores_B),
-    }
+    # Return just the float — no printing, no dictionary.
+    # 100.0 = indistinguishable styles, 0.0 = completely different.
+    return (1.0 - separation) * 100.0
 
 
 # ==============================
@@ -379,29 +354,9 @@ if __name__ == "__main__":
 
     model_path = "best_by_game_discriminator.keras"
 
-    # ------------------------------------------------------------------
-    # TRAIN MODE
-    # Loads both players' full game files, automatically balances them
-    # to equal game counts, trains the model, saves the best weights,
-    # then immediately runs simScore so you get results in one command.
-    # ------------------------------------------------------------------
     if mode == "train":
         print(f"\n--- TRAIN MODE: {player_A} vs {player_B} ---\n")
 
-        # ---------------------------------------------------------------
-        # EQUAL GAME BALANCING
-        # Load ALL games from both players with no cap first.
-        # After loading, compare how many usable games each player has
-        # (usable = passed the < 5 move minimum after endgame filtering).
-        # Trim both lists to whichever player has fewer usable games.
-        #
-        # WHY THIS MATTERS:
-        # If Player A has 500 games and Player B has 200, and we train
-        # on all of them, the model sees 2.5x more of Player A. It will
-        # develop a bias — learning Player A's style very well and
-        # Player B's style less well. This makes the discrimination unfair
-        # and the similarity score unreliable. Equal counts fix this.
-        # ---------------------------------------------------------------
         print(f"Loading all games for Player A ({player_A})...")
         b_A, m_A, l_A = load_json_game_sequences(
             json_A, player_name=player_A, label_value=1.0
@@ -412,12 +367,7 @@ if __name__ == "__main__":
             json_B, player_name=player_B, label_value=0.0
         )
 
-        # Find which player has fewer usable games after endgame filtering.
         min_games = min(len(l_A), len(l_B))
-
-        # Trim both players down to that minimum count.
-        # Slicing from the front keeps the earliest games — consistent
-        # and reproducible across runs.
         b_A, m_A, l_A = b_A[:min_games], m_A[:min_games], l_A[:min_games]
         b_B, m_B, l_B = b_B[:min_games], m_B[:min_games], l_B[:min_games]
 
@@ -425,12 +375,10 @@ if __name__ == "__main__":
         print(f"Player B ({player_B}) usable games: {len(l_B)}")
         print(f"Training on {min_games} games per player ({min_games * 2} total)\n")
 
-        # Combine both players into one dataset.
         raw_boards = b_A + b_B
         raw_moves  = m_A + m_B
         raw_labels = l_A + l_B
 
-        # Shuffle so validation_split doesn't test exclusively on one player.
         combined = list(zip(raw_boards, raw_moves, raw_labels))
         random.shuffle(combined)
         raw_boards, raw_moves, raw_labels = zip(*combined)
@@ -471,26 +419,18 @@ if __name__ == "__main__":
         print(f"\nTraining complete. Best weights saved to '{model_path}'.")
 
         # ---------------------------------------------------------------
-        # AUTO SIMSCORE
-        # Training is done — immediately compute and print the overall
-        # playstyle similarity without requiring a second terminal command.
-        # We reload from the saved checkpoint specifically to ensure we
-        # are scoring with the best epoch's weights, not the final epoch's
-        # weights (which early stopping may have moved past).
+        # AUTO SIMSCORE — runs immediately after training completes.
+        # Reloads the best saved weights before scoring.
         # ---------------------------------------------------------------
         print(f"\nAuto-running similarity score on saved best model...\n")
         best_model = tf.keras.models.load_model(model_path)
-        result     = compute_overall_similarity(json_A, json_B, player_A, player_B, best_model)
+        similarity = compute_overall_similarity(json_A, json_B, player_A, player_B, best_model)
 
-        if result:
-            print_similarity_report(result, player_A, player_B)
+        if similarity is not None:
+            print(f"Overall playstyle similarity: {similarity:.2f}%")
+        else:
+            print("Could not compute similarity — not enough scoreable games.")
 
-    # ------------------------------------------------------------------
-    # SIMSCORE MODE
-    # Loads the already-saved model and prints the overall similarity
-    # report without retraining. Use this any time after training to
-    # re-run scoring without paying the training cost again.
-    # ------------------------------------------------------------------
     elif mode == "simScore":
         print(f"\n--- SIMSCORE MODE: {player_A} vs {player_B} ---\n")
 
@@ -500,8 +440,10 @@ if __name__ == "__main__":
             sys.exit(1)
 
         print(f"Loading model from '{model_path}'...\n")
-        model  = tf.keras.models.load_model(model_path)
-        result = compute_overall_similarity(json_A, json_B, player_A, player_B, model)
+        model      = tf.keras.models.load_model(model_path)
+        similarity = compute_overall_similarity(json_A, json_B, player_A, player_B, model)
 
-        if result:
-            print_similarity_report(result, player_A, player_B)
+        if similarity is not None:
+            print(f"Overall playstyle similarity: {similarity:.2f}%")
+        else:
+            print("Could not compute similarity — not enough scoreable games.")
