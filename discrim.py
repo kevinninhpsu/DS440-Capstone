@@ -463,7 +463,7 @@ if __name__ == "__main__":
             x={"board_seq": all_boards, "move_seq": all_moves_onehot},
             y=all_labels,
             batch_size=32,
-            epochs=2,
+            epochs=20,
             validation_split=0.2,
             callbacks=[early_stop, checkpoint]
         )
