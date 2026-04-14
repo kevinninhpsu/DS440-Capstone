@@ -130,10 +130,11 @@ def move_to_conf_matrix(move):
 
     
 class Agent:
-    def __init__(self, id,stockfish_path=""):
+    def __init__(self, id,a=0.5,stockfish_path=""):
         print('Agent V2')
         print(tf.config.list_physical_devices('GPU'))
         self.id = id
+        self.a = a
         sf = Stockfish(stockfish_path)
         sf.set_depth(6)       
         sf.set_skill_level(6)     
@@ -180,7 +181,7 @@ class Agent:
             tensor[move_to_conf(move)] = score
         return tensor
     
-    def act(self, state, a=0.5):
+    def act(self, state):
         x = encode_board(state)
         x = np.expand_dims(x, axis=0)
         legal_moves = list(state.legal_moves)
@@ -194,7 +195,7 @@ class Agent:
         exp_out_softmax = tf.nn.softmax(exp_out_flat)     # softmax
         exp_out_normalized = tf.reshape(exp_out_softmax, orig_shape)  # back to (8,8,8,12)
         
-        balancer = probs*a+exp_out_normalized*(1-a) # score = expected outcome + player preference
+        balancer = probs*self.a+exp_out_normalized*(1-self.a) # score = expected outcome + player preference
         
         scored_moves = []
         for move in state.legal_moves:
@@ -208,15 +209,16 @@ class Agent:
     def train(self, games):
         samples = pgn_to_player_samples(games, self.id)
         batch_size = 32
-        epochs = 1
+        epochs = 10
         n = len(samples)
     
         def gen():
-            for i in range(0, n, batch_size):
-                batch = samples[i:i+batch_size]
-                X = np.array([s[0] for s in batch], dtype=np.float32)
-                Y = np.array([s[1] for s in batch], dtype=np.float32)  # (batch, 8,8,8,12)
-                yield X, Y
+            while True:  
+                for i in range(0, n, batch_size):
+                    batch = samples[i:i+batch_size]
+                    X = np.array([s[0] for s in batch], dtype=np.float32)
+                    Y = np.array([s[1] for s in batch], dtype=np.float32)
+                    yield X, Y
     
         def build_model():
             inputs = tf.keras.layers.Input(shape=(8, 8, 12))
