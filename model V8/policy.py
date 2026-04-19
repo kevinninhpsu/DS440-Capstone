@@ -1,8 +1,10 @@
 import chess.pgn
 import json
 import numpy as np
+import os
 import tensorflow as tf
 from stockfish import Stockfish
+import pickle
 print('POLICY V8 (JOINT)')
 
 symbol_map = {
@@ -68,16 +70,18 @@ def promo_encode(move):
         chess.KNIGHT: 4
     }[move.promotion]
 
-def encode_board(board):
-    tensor = np.zeros((8, 8, 12), bool)
+def encode_boards(board_history, N=2):
+    tensor = np.zeros((8, 8, 12 * N), dtype=np.float32)
 
-    for square, piece in board.piece_map().items():
-        row = 7 - (square // 8)
-        col = square % 8
-        plane = piece.piece_type - 1
-        if piece.color == chess.BLACK:
-            plane += 6
-        tensor[row, col, plane] = 1.0
+    for i, board in enumerate(board_history[-N:]):
+        offset = i * 12
+        for square, piece in board.piece_map().items():
+            row = 7 - (square // 8)
+            col = square % 8
+            plane = piece.piece_type - 1
+            if piece.color == chess.BLACK:
+                plane += 6
+            tensor[row, col, offset + plane] = 1.0
 
     return tensor
 
@@ -141,160 +145,56 @@ class Agent:
 
 
 
-    def act(self, board):
-        x = encode_board(board)
+    def act(self, board, board_history=None):
+        if board_history is None:
+            board_history = [board]
+        x = encode_boards(board_history)
         x = np.expand_dims(x, axis=0)
 
         move_logits = self.model.predict(x, verbose=0)[0]
-
         legal_moves = list(board.legal_moves)
 
-        best_move = max(
-            legal_moves,
-            key=lambda m: move_logits[move_to_conf(m)]
-        )
+        scores = np.array([move_logits[move_to_conf(m)] for m in legal_moves], dtype=np.float32)
+        scores = scores - np.max(scores)
+        probs = np.exp(scores)
+        probs /= probs.sum()
 
-        return best_move
+        chosen_idx = np.random.choice(len(legal_moves), p=probs)
+        return legal_moves[chosen_idx]
 
-    def train(self, games, temperature=1.5, alpha=0.7, batch_size=32, epochs=10):
+    def train(self, games, temperature=1.5, alpha=0.7, batch_size=32, epochs=20, save_path="./hybrid_dataset/data.pkl"):
 
-        samples = self._build_hybrid_dataset(games, temperature, alpha)
+        samples = self._build_hybrid_dataset(games, temperature, alpha, save_path=save_path)
 
-        model = self.build_model()
-
-        model.compile(
-            optimizer=tf.keras.optimizers.Adam(1e-4, clipnorm=1.0),
-            loss=tf.keras.losses.CategoricalCrossentropy()
-        )
+        n = len(samples)
 
         def gen():
             while True:
-                np.random.shuffle(samples)
-                for i in range(0, len(samples), batch_size):
+                for i in range(0, n, batch_size):
                     batch = samples[i:i + batch_size]
-
                     X = np.array([b["board"] for b in batch], dtype=np.float32)
                     Y = np.array([b["policy"] for b in batch], dtype=np.float32)
-
                     yield X, Y
 
-        steps = len(samples) // batch_size
+        model = self.build_model()
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+            loss='categorical_crossentropy',
+            metrics=['accuracy']
+        )
 
+        steps = (n + batch_size - 1) // batch_size
         model.fit(gen(), steps_per_epoch=steps, epochs=epochs)
 
         self.model = model
 
-    def _build_hybrid_dataset(self, games, temperature, alpha):
-        samples = []
-        for game in games:
-            board = game.board()
-            for move in game.mainline_moves():
-                if board.is_game_over():
-                    break
-
-                board_tensor = encode_board(board)
-                legal_moves = list(board.legal_moves)
-
-                # -------------------------
-                # HUMAN PROBS (one-hot)
-                # -------------------------
-                human_probs = np.zeros(len(legal_moves), dtype=np.float32)
-                for j, m in enumerate(legal_moves):
-                    if m == move:
-                        human_probs[j] = 1.0
-                        break
-
-                # -------------------------
-                # STOCKFISH TOP-K MOVES
-                # -------------------------
-                base_eval = self.cached_eval_state(board)
-                top_moves = self.get_top_moves(board, top_k=5)
-                sf_scores = np.full(len(legal_moves), -1e4, dtype=np.float32)
-                for m in top_moves:
-                    if m in legal_moves:
-                        idx = legal_moves.index(m)
-                        board.push(m)
-                        if not board.is_game_over():
-                            eval_after = self.cached_eval_state(board)
-                        else:
-                            eval_after = base_eval
-                        board.pop()
-                        sf_scores[idx] = eval_after - base_eval
-
-                # -------------------------
-                # SOFTMAX OVER SCORES
-                # -------------------------
-                sf_scores = np.clip(sf_scores, -1000, 1000)
-                sf_scores = sf_scores - np.max(sf_scores)
-                sf_probs = np.exp(sf_scores / temperature)
-                sf_probs /= (np.sum(sf_probs) + 1e-8)
-
-                # -------------------------
-                # HYBRID TARGET
-                # -------------------------
-                final_probs = alpha * human_probs + (1 - alpha) * sf_probs
-                target = np.zeros((8, 8, 8, 12), dtype=np.float32)
-                for m, p in zip(legal_moves, final_probs):
-                    target[move_to_conf(m)] = p
-
-                # checks AFTER zip loop
-                if np.any(np.isnan(target)) or np.any(np.isinf(target)):
-                    print("BAD TARGET detected")
-                    print("sf_scores:", sf_scores[:10])
-                    print("sf_probs:", sf_probs[:10])
-                    print("final_probs:", final_probs[:10])
-                    board.push(move)
-                    continue
-
-                if np.any(np.isnan(board_tensor)):
-                    print("BAD BOARD detected")
-                    board.push(move)
-                    continue
-
-                samples.append({
-                    "board": board_tensor,
-                    "policy": target
-                })
-
-                board.push(move)
-
-        return samples
-
-    def get_top_moves(self, board, top_k=5):
-        self.sf.set_fen_position(board.fen())
-
-        top = self.sf.get_top_moves(top_k)
-
-        return [chess.Move.from_uci(m["Move"]) for m in top]
     def build_model(self):
-        inputs = tf.keras.layers.Input(shape=(8, 8, 12))
-
-        x = tf.keras.layers.Conv2D(64, 3, padding="same", activation="relu")(inputs)
-        x = tf.keras.layers.BatchNormalization()(x)
-
-        x = tf.keras.layers.Conv2D(128, 3, padding="same", activation="relu")(x)
-        x = tf.keras.layers.BatchNormalization()(x)
-
-        x = tf.keras.layers.Conv2D(256, 3, padding="same", activation="relu")(x)
-        x = tf.keras.layers.BatchNormalization()(x)
-
-        x = tf.keras.layers.GlobalAveragePooling2D()(x)  # ← replaces Reshape + MHA
-
-        x = tf.keras.layers.Dense(512, activation="relu")(x)
-
-        move_logits = tf.keras.layers.Dense(8 * 8 * 8 * 12)(x)
-        move_logits = tf.keras.layers.Reshape((8, 8, 8, 12), name="policy")(move_logits)
-
-        return tf.keras.Model(inputs, move_logits)
-    def build_model(self):
-        inputs = tf.keras.layers.Input(shape=(8, 8, 12))
-
-        x = tf.keras.layers.Reshape((64, 12))(inputs)
+        inputs = tf.keras.layers.Input(shape=(8, 8, 24))  # 2 boards x 12 planes
+        x = tf.keras.layers.Reshape((64, 24))(inputs)
 
         x = tf.keras.layers.Dense(256, activation='relu')(x)
         x = tf.keras.layers.LayerNormalization()(x)
 
-        # attention blocks
         attn1 = tf.keras.layers.MultiHeadAttention(num_heads=8, key_dim=32)(x, x)
         x = tf.keras.layers.Add()([x, attn1])
         x = tf.keras.layers.LayerNormalization()(x)
@@ -310,7 +210,6 @@ class Agent:
         x = tf.keras.layers.LayerNormalization()(x)
         x = tf.keras.layers.Dropout(0.1)(x)
 
-        # dense layers
         x = tf.keras.layers.Flatten()(x)
         x = tf.keras.layers.Dense(2048, activation='relu')(x)
         x = tf.keras.layers.LayerNormalization()(x)
@@ -324,10 +223,83 @@ class Agent:
         x = tf.keras.layers.LayerNormalization()(x)
         x = tf.keras.layers.Dropout(0.1)(x)
 
-        x = tf.keras.layers.Dense(256, activation='relu')(x)
-
-        # output
-        x = tf.keras.layers.Dense(8 * 8 * 8 * 12)(x)  # no activation — logits
+        # ← softmax output like V7 — prevents NaN
+        x = tf.keras.layers.Dense(8 * 8 * 8 * 12, activation='softmax')(x)
         outputs = tf.keras.layers.Reshape((8, 8, 8, 12), name="policy")(x)
 
         return tf.keras.Model(inputs, outputs)
+
+    def _build_hybrid_dataset(self, games, temperature, alpha, save_path="./hybrid_dataset/data.pkl"):
+        samples = []
+        for game in games:
+            board = game.board()
+            board_history = []                      
+            for move in game.mainline_moves():
+                if board.is_game_over():
+                    break
+                board_history.append(board.copy())    
+                board_tensor = encode_boards(board_history) 
+                legal_moves = list(board.legal_moves)
+                # -------------------------
+                # HUMAN PROBS (one-hot)
+                # -------------------------
+                human_probs = np.zeros(len(legal_moves), dtype=np.float32)
+                for j, m in enumerate(legal_moves):
+                    if m.uci() == move.uci():  # ← UCI string comparison
+                        human_probs[j] = 1.0
+                        break
+                # -------------------------
+                # STOCKFISH TOP-K MOVES
+                # -------------------------
+                base_eval = self.cached_eval_state(board)
+                top_moves = self.get_top_moves(board, top_k=5)
+                sf_scores = np.full(len(legal_moves), -1e4, dtype=np.float32)
+                for m in top_moves:
+                    if m.uci() in [x.uci() for x in legal_moves]:  # ← UCI comparison
+                        idx = [x.uci() for x in legal_moves].index(m.uci())
+                        board.push(m)
+                        if not board.is_game_over():
+                            eval_after = self.cached_eval_state(board)
+                        else:
+                            eval_after = base_eval
+                        board.pop()
+                        sf_scores[idx] = eval_after - base_eval
+                # -------------------------
+                # SOFTMAX OVER SCORES
+                # -------------------------
+                sf_scores = np.clip(sf_scores, -1000, 1000)
+                sf_scores = sf_scores - np.max(sf_scores)
+                sf_probs = np.exp(sf_scores / temperature)
+                sf_probs /= (np.sum(sf_probs) + 1e-8)
+                # -------------------------
+                # HYBRID TARGET
+                # -------------------------
+                final_probs = alpha * human_probs + (1 - alpha) * sf_probs
+                final_probs = final_probs / (final_probs.sum() + 1e-8)
+                target = np.zeros((8, 8, 8, 12), dtype=np.float32)
+                for m, p in zip(legal_moves, final_probs):
+                    target[move_to_conf(m)] = p
+                if target.sum() < 1e-6:
+                    board.push(move)
+                    continue
+                samples.append({
+                "board": board_tensor,
+                "policy": target
+                })
+                board.push(move)
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            print(f"Saving {len(samples)} samples to {save_path}...")
+            with open(save_path, "wb") as f:
+                pickle.dump(samples, f)
+            print("Saved.")
+        return samples
+
+
+    def get_top_moves(self, board, top_k):
+        self.sf.set_fen_position(board.fen())
+
+        top = self.sf.get_top_moves(top_k)
+
+        return [chess.Move.from_uci(m["Move"]) for m in top]
+  
