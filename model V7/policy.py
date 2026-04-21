@@ -139,23 +139,7 @@ class Agent:
         sf.set_depth(6)       
         sf.set_skill_level(6)     
         self.sf = sf
-    def is_blunder(self, board, move, sf, threshold=200):
-    
-        sf.set_fen_position(board.fen())
-        before = sf.get_evaluation()['value']
-    
-        # Get eval after move
-        board_copy = board.copy()
-        board_copy.push(move)
-        sf.set_fen_position(board_copy.fen())
-        after = -sf.get_evaluation()['value']
-    
-        if sf.get_evaluation()['type'] == "mate":
-            print('mate')
-            return False
-            
-        print(before, after, board, move)
-        return (before - after) > threshold
+
 
     def evaluate_state(self,board):
         self.sf.set_fen_position(board.fen())
