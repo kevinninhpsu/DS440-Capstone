@@ -70,19 +70,15 @@ def promo_encode(move):
         chess.KNIGHT: 4
     }[move.promotion]
 
-def encode_boards(board_history, N=2):
-    tensor = np.zeros((8, 8, 12 * N), dtype=np.float32)
-
-    for i, board in enumerate(board_history[-N:]):
-        offset = i * 12
-        for square, piece in board.piece_map().items():
-            row = 7 - (square // 8)
-            col = square % 8
-            plane = piece.piece_type - 1
-            if piece.color == chess.BLACK:
-                plane += 6
-            tensor[row, col, offset + plane] = 1.0
-
+def encode_boards(board):
+    tensor = np.zeros((8, 8, 12), dtype=np.float32)
+    for square, piece in board.piece_map().items():
+        row = 7 - (square // 8)
+        col = square % 8
+        plane = piece.piece_type - 1
+        if piece.color == chess.BLACK:
+            plane += 6
+        tensor[row, col, plane] = 1.0
     return tensor
 
 def move_to_conf(move):
@@ -116,12 +112,8 @@ class Agent:
         sf.set_skill_level(4)
         self.sf = sf
 
-        # ✅ CACHE ADDED
         self.eval_cache = {}
 
-    # -------------------------
-    # CACHED EVALUATION
-    # -------------------------
     def cached_eval_state(self, board):
         fen = board.fen()
         if fen in self.eval_cache:
@@ -143,12 +135,8 @@ class Agent:
         self.eval_cache[fen] = value
         return value
 
-
-
-    def act(self, board, board_history=None):
-        if board_history is None:
-            board_history = [board]
-        x = encode_boards(board_history)
+    def act(self, board):
+        x = encode_boards(board)
         x = np.expand_dims(x, axis=0)
 
         move_logits = self.model.predict(x, verbose=0)[0]
@@ -162,9 +150,9 @@ class Agent:
         chosen_idx = np.random.choice(len(legal_moves), p=probs)
         return legal_moves[chosen_idx]
 
-    def train(self, games, temperature=1.5, alpha=0.7, batch_size=32, epochs=20, save_path="./hybrid_dataset/data.pkl"):
+    def train(self, games, alpha=0.7, batch_size=32, epochs=20, save_path="./hybrid_dataset/data.pkl"):
 
-        samples = self._build_hybrid_dataset(games, temperature, alpha, save_path=save_path)
+        samples = self._build_hybrid_dataset(games, alpha, save_path=save_path)
 
         n = len(samples)
 
@@ -179,7 +167,7 @@ class Agent:
         model = self.build_model()
         model.compile(
             optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
-            loss='categorical_crossentropy',
+            loss=tf.keras.losses.CategoricalCrossentropy(from_logits=False),
             metrics=['accuracy']
         )
 
@@ -189,8 +177,8 @@ class Agent:
         self.model = model
 
     def build_model(self):
-        inputs = tf.keras.layers.Input(shape=(8, 8, 24))  # 2 boards x 12 planes
-        x = tf.keras.layers.Reshape((64, 24))(inputs)
+        inputs = tf.keras.layers.Input(shape=(8, 8, 12))  # 1 board x 12 planes
+        x = tf.keras.layers.Reshape((64, 12))(inputs)
 
         x = tf.keras.layers.Dense(256, activation='relu')(x)
         x = tf.keras.layers.LayerNormalization()(x)
@@ -223,58 +211,44 @@ class Agent:
         x = tf.keras.layers.LayerNormalization()(x)
         x = tf.keras.layers.Dropout(0.1)(x)
 
-        # ← softmax output like V7 — prevents NaN
         x = tf.keras.layers.Dense(8 * 8 * 8 * 12, activation='softmax')(x)
         outputs = tf.keras.layers.Reshape((8, 8, 8, 12), name="policy")(x)
 
         return tf.keras.Model(inputs, outputs)
 
-    def _build_hybrid_dataset(self, games, temperature, alpha, save_path="./hybrid_dataset/data.pkl"):
+    def _build_hybrid_dataset(self, games, alpha, save_path="./hybrid_dataset/data.pkl"):
         samples = []
         for game in games:
             board = game.board()
-            board_history = []                      
             for move in game.mainline_moves():
                 if board.is_game_over():
                     break
-                board_history.append(board.copy())    
-                board_tensor = encode_boards(board_history) 
+                board_tensor = encode_boards(board)
                 legal_moves = list(board.legal_moves)
-                # -------------------------
-                # HUMAN PROBS (one-hot)
-                # -------------------------
+
                 human_probs = np.zeros(len(legal_moves), dtype=np.float32)
                 for j, m in enumerate(legal_moves):
-                    if m.uci() == move.uci():  # ← UCI string comparison
+                    if m.uci() == move.uci():
                         human_probs[j] = 1.0
                         break
-                # -------------------------
-                # STOCKFISH TOP-K MOVES
-                # -------------------------
+
                 base_eval = self.cached_eval_state(board)
                 top_moves = self.get_top_moves(board, top_k=5)
                 sf_scores = np.full(len(legal_moves), -1e4, dtype=np.float32)
+                legal_uci_map = {x.uci(): i for i, x in enumerate(legal_moves)}
+
                 for m in top_moves:
-                    if m.uci() in [x.uci() for x in legal_moves]:  # ← UCI comparison
-                        idx = [x.uci() for x in legal_moves].index(m.uci())
+                    if m.uci() in legal_uci_map:
+                        idx = legal_uci_map[m.uci()]
                         board.push(m)
-                        if not board.is_game_over():
-                            eval_after = self.cached_eval_state(board)
-                        else:
-                            eval_after = base_eval
+                        eval_after = self.cached_eval_state(board) if not board.is_game_over() else base_eval
                         board.pop()
                         sf_scores[idx] = eval_after - base_eval
-                # -------------------------
-                # SOFTMAX OVER SCORES
-                # -------------------------
-                sf_scores = np.clip(sf_scores, -1000, 1000)
-                sf_scores = sf_scores - np.max(sf_scores)
-                sf_probs = np.exp(sf_scores / temperature)
-                sf_probs /= (np.sum(sf_probs) + 1e-8)
-                # -------------------------
-                # HYBRID TARGET
-                # -------------------------
-                final_probs = alpha * human_probs + (1 - alpha) * sf_probs
+
+                sf_probs = tf.convert_to_tensor(sf_scores, dtype=tf.float32)
+                sf_probs_normalized = tf.nn.softmax(sf_probs).numpy()
+
+                final_probs = alpha * human_probs + (1 - alpha) * sf_probs_normalized
                 final_probs = final_probs / (final_probs.sum() + 1e-8)
                 target = np.zeros((8, 8, 8, 12), dtype=np.float32)
                 for m, p in zip(legal_moves, final_probs):
@@ -283,23 +257,15 @@ class Agent:
                     board.push(move)
                     continue
                 samples.append({
-                "board": board_tensor,
-                "policy": target
+                    "board": board_tensor,
+                    "policy": target
                 })
                 board.push(move)
-        if save_path:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            print(f"Saving {len(samples)} samples to {save_path}...")
-            with open(save_path, "wb") as f:
-                pickle.dump(samples, f)
-            print("Saved.")
-        return samples
 
+
+        return samples
 
     def get_top_moves(self, board, top_k):
         self.sf.set_fen_position(board.fen())
-
         top = self.sf.get_top_moves(top_k)
-
         return [chess.Move.from_uci(m["Move"]) for m in top]
-  
