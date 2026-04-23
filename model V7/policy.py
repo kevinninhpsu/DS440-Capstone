@@ -33,7 +33,6 @@ def load_json(json_file, n = -1):
         n -= 1
         game = chess.pgn.Game()
         
-        # Batch header assignment
         game.headers.update({
             "Event":  g.get("event", "?"),
             "White":  g.get("white", "?"),
@@ -41,7 +40,6 @@ def load_json(json_file, n = -1):
             "Result": g.get("result", "*")
         })
 
-        # Parse moves more efficiently
         moves = DIV_RE.split(g.get("moves", ""))
         moves = [m.strip() for m in moves if m and not m.strip().isdigit()]
 
@@ -73,7 +71,7 @@ def pgn_to_player_samples(games, player_id=""):
             include_white = (player_id == white)
             include_black = (player_id == black)
             if not (include_white or include_black):
-                continue  # skip
+                continue
         board = game.board()
 
         for move in game.mainline_moves():
@@ -90,13 +88,11 @@ def encode_board(board):
     tensor = np.zeros((8, 8, 12), bool)
 
     for square, piece in board.piece_map().items():
-        
         row = 7 - (square // 8)
         col = square % 8
         plane = piece.piece_type - 1
         if piece.color == chess.BLACK:
             plane += 6
-        
         tensor[row, col, plane] = 1.0
     return tensor
 
@@ -119,77 +115,87 @@ def move_to_conf(move):
         return from_row, from_col, to_row, to_col
 
 
-
 def move_to_conf_matrix(move):
-    
     matrix = np.zeros((8, 8, 8, 12), dtype=np.float32)
-
     matrix[move_to_conf(move)] = 1.0
-
     return matrix
 
-    
+
 class Agent:
-    def __init__(self, id,a=0.5,stockfish_path=""):
+    def __init__(self, id, a=0.5, stockfish_path=""):
         print('Agent V2')
         print(tf.config.list_physical_devices('GPU'))
         self.id = id
         self.a = a
         sf = Stockfish(stockfish_path)
-        sf.set_depth(6)       
-        sf.set_skill_level(6)     
+        sf.set_depth(4)
+        sf.set_skill_level(4)
         self.sf = sf
+        self.eval_cache = {}
 
+    def cached_eval_state(self, board):
+        fen = board.fen()
+        if fen in self.eval_cache:
+            return self.eval_cache[fen]
 
-    def evaluate_state(self,board):
-        self.sf.set_fen_position(board.fen())
-        eval_info = self.sf.get_evaluation()
-        
-        if eval_info['type'] == 'mate':
-            score = 10000 if eval_info['value'] > 0 else -10000
+        self.sf.set_fen_position(fen)
+        info = self.sf.get_evaluation()
+
+        if info is None or "type" not in info or "value" not in info:
+            self.eval_cache[fen] = 0
+            print(fen)
+            return 0
+
+        if info["type"] == "mate":
+            value = 500 if info["value"] > 0 else -500
         else:
-            score = eval_info['value'] 
-        return score
-    def evaluate_move(self,board,move):
-        base_board_centipawn=self.evaluate_state(board)
+            value = np.clip(info["value"], -500, 500)
+
+        self.eval_cache[fen] = value
+        return value
+
+    def evaluate_move(self, board, move):
+        base_board_centipawn = self.cached_eval_state(board)
         board.push(move)
-        next_board_centipawn=self.evaluate_state(board)
-        score = next_board_centipawn-base_board_centipawn # delta centipawns between board0 to board1
+        next_board_centipawn = self.cached_eval_state(board)
+        score = next_board_centipawn - base_board_centipawn
         board.pop()
         return score
-    def expected_outcome_matrix(self,board,legal_moves):
-        tensor = np.zeros((8,8, 8, 12), np.float32)
+
+    def expected_outcome_matrix(self, board, legal_moves):
+        tensor = np.zeros((8, 8, 8, 12), np.float32)
         for move in legal_moves:
-            
-            score = self.evaluate_move(board,move)
+            score = self.evaluate_move(board, move)
             tensor[move_to_conf(move)] = score
         return tensor
-    
+
     def act(self, state):
         x = encode_board(state)
         x = np.expand_dims(x, axis=0)
-        legal_moves = list(state.legal_moves)
-        
-        probs = self.model.predict(x, verbose=0)[0]  # shape (8,8,8,12)
-        exp_out = self.expected_outcome_matrix(state,legal_moves)
-        #nomalize the outcome matrix data to range between 0 and 1 that would sum up to 1.
-        orig_shape = exp_out.shape  # save original shape
+
+        top_moves = self.get_top_moves(state, 5)
+
+        probs = self.model.predict(x, verbose=0)[0]
+        exp_out = self.expected_outcome_matrix(state, top_moves)  # only top 5
+        orig_shape = exp_out.shape
         exp_out = tf.convert_to_tensor(exp_out, dtype=tf.float32)
-        exp_out_flat = tf.reshape(exp_out, [-1])          # flatten
-        exp_out_softmax = tf.nn.softmax(exp_out_flat)     # softmax
-        exp_out_normalized = tf.reshape(exp_out_softmax, orig_shape)  # back to (8,8,8,12)
-        
-        balancer = probs*self.a+exp_out_normalized*(1-self.a) # score = expected outcome + player preference
-        
+        exp_out_flat = tf.reshape(exp_out, [-1])
+        exp_out_softmax = tf.nn.softmax(exp_out_flat)
+        exp_out_normalized = tf.reshape(exp_out_softmax, orig_shape)
+
+        balancer = probs * self.a + exp_out_normalized * (1 - self.a)
+
         scored_moves = []
-        for move in state.legal_moves:
-            idx = move_to_conf(move) 
+        for move in top_moves:  # only top 5
+            idx = move_to_conf(move)
             move_score = balancer[idx]
             scored_moves.append((move_score, move))
-        
-        return max(scored_moves, key=lambda x: x[0])[1] if scored_moves else ValueError('Error: No Legal Move in Matrix')
-        
 
+        return max(scored_moves, key=lambda x: x[0])[1] if scored_moves else ValueError('Error: No Legal Move in Matrix')
+    def get_top_moves(self, board, top_k): 
+        self.sf.set_fen_position(board.fen()) 
+        top = self.sf.get_top_moves(top_k) 
+        return [chess.Move.from_uci(m["Move"]) for m in top]
     def train(self, games):
         samples = pgn_to_player_samples(games, self.id)
         batch_size = 32
@@ -208,11 +214,9 @@ class Agent:
             inputs = tf.keras.layers.Input(shape=(8, 8, 12))
             
             x = tf.keras.layers.Reshape((64, 12))(inputs)
-            
             x = tf.keras.layers.Dense(256, activation='relu')(x)
             x = tf.keras.layers.LayerNormalization()(x)
 
-            # attention blocks
             attn1 = tf.keras.layers.MultiHeadAttention(num_heads=8, key_dim=32)(x, x)
             x = tf.keras.layers.Add()([x, attn1])
             x = tf.keras.layers.LayerNormalization()(x)
@@ -228,7 +232,6 @@ class Agent:
             x = tf.keras.layers.LayerNormalization()(x)
             x = tf.keras.layers.Dropout(0.1)(x)
             
-            # dense layers
             x = tf.keras.layers.Flatten()(x)
             x = tf.keras.layers.Dense(4096, activation='relu')(x)
             x = tf.keras.layers.LayerNormalization()(x)
@@ -244,7 +247,6 @@ class Agent:
         
             x = tf.keras.layers.Dense(512, activation='relu')(x)
             
-            # Output
             x = tf.keras.layers.Dense(8*8*8*12, activation='softmax')(x)
             outputs = tf.keras.layers.Reshape((8, 8, 8, 12))(x)
             
@@ -259,3 +261,4 @@ class Agent:
     
         steps = (n + batch_size - 1) // batch_size
         self.model.fit(gen(), steps_per_epoch=steps, epochs=epochs)
+        
